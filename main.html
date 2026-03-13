@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>粒子土星 - 全平台适配版</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; font-family: 'Microsoft YaHei', sans-serif; color: white; touch-action: none; }
+        #canvas-container { width: 100vw; height: 100vh; position: absolute; top: 0; left: 0; z-index: 1; background: radial-gradient(circle at center, #050505 0%, #0b0b10 100%); }
+        #ui-layer { position: absolute; top: 30px; left: 30px; z-index: 10; pointer-events: none; }
+        .glass-panel { background: rgba(5, 5, 5, 0.7); backdrop-filter: blur(12px); padding: 24px; border-radius: 2px; border-left: 2px solid #c5a059; box-shadow: 0 10px 40px rgba(0, 0, 0, 0.9); max-width: 280px; }
+        h1 { font-weight: 200; font-size: 1.8rem; margin: 0 0 10px 0; color: #e0cda7; letter-spacing: 4px; text-transform: uppercase; }
+        .status-text { font-size: 0.85rem; color: #888; line-height: 1.6; font-family: monospace; }
+        .highlight { color: #c5a059; font-weight: bold; }
+        #controls { position: absolute; bottom: 40px; right: 40px; z-index: 10; }
+        button { background: rgba(0,0,0,0.5); border: 1px solid rgba(197, 160, 89, 0.3); color: #c5a059; padding: 12px 30px; font-size: 0.8rem; cursor: pointer; transition: all 0.4s ease; text-transform: uppercase; letter-spacing: 2px; backdrop-filter: blur(4px); }
+        button:hover { background: rgba(197, 160, 89, 0.2); border-color: #c5a059; }
+        #loading { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 20; text-align: center; color: #666; font-size: 0.8rem; letter-spacing: 3px; pointer-events: none; }
+        
+        /* 关键修复：确保视频元素虽然隐藏但仍能被浏览器渲染逻辑捕获 */
+        .input_video { 
+            position: absolute; 
+            top: 0; left: 0; 
+            opacity: 0; 
+            z-index: -1; 
+            width: 1px; height: 1px; 
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+    <video class="input_video" playsinline webkit-playsinline muted autoplay></video>
+    
+    <div id="loading">正在连接摄像头与物理引擎...</div>
+    
+    <div id="ui-layer">
+        <div class="glass-panel">
+            <h1>SATURN</h1>
+            <div class="status-text">
+                控制器: <span id="status-mode" class="highlight">初始化</span><br>
+                信号源: <span id="signal-src">等待输入...</span><br><br>
+                > 粒子负载: 120万<br>
+                > 交互反馈: 已就绪
+            </div>
+        </div>
+    </div>
+
+    <div id="controls">
+        <button onclick="toggleFullScreen()">全屏沉浸模式</button>
+    </div>
+    
+    <div id="canvas-container"></div>
+
+    <script type="x-shader/x-vertex" id="vertexshader">
+        attribute float size; attribute vec3 customColor; attribute float opacityAttr;
+        attribute float orbitSpeed; attribute float isRing; attribute float aRandomId;
+        varying vec3 vColor; varying float vDist; varying float vOpacity;
+        varying float vScaleFactor; varying float vIsRing;
+        uniform float uTime; uniform float uScale; uniform float uRotationX;
+        mat2 rotate2d(float _angle){ return mat2(cos(_angle),-sin(_angle), sin(_angle),cos(_angle)); }
+        void main() {
+            float normScaleLOD = clamp((uScale - 0.15) / 2.35, 0.0, 1.0);
+            float visibilityThreshold = 0.9 + pow(normScaleLOD, 1.2) * 0.1; 
+            if (aRandomId > visibilityThreshold) { gl_Position = vec4(0.0); gl_PointSize = 0.0; return; }
+            vec3 pos = position;
+            if (isRing > 0.5) {
+                float angleOffset = uTime * orbitSpeed * 0.2;
+                vec2 rotatedXZ = rotate2d(angleOffset) * pos.xz;
+                pos.x = rotatedXZ.x; pos.z = rotatedXZ.y;
+            } else {
+                float bodyAngle = uTime * 0.03;
+                vec2 rotatedXZ = rotate2d(bodyAngle) * pos.xz;
+                pos.x = rotatedXZ.x; pos.z = rotatedXZ.y;
+            }
+            float cx = cos(uRotationX); float sx = sin(uRotationX);
+            float ry = pos.y * cx - pos.z * sx; float rz = pos.y * sx + pos.z * cx;
+            pos.y = ry; pos.z = rz;
+            vec4 mvPosition = modelViewMatrix * vec4(pos * uScale, 1.0);
+            float dist = -mvPosition.z; vDist = dist;
+            gl_Position = projectionMatrix * mvPosition;
+            float pointSize = size * (350.0 / dist) * 0.55;
+            gl_PointSize = clamp(pointSize, 0.0, 300.0);
+            vColor = customColor; vOpacity = opacityAttr; vScaleFactor = uScale; vIsRing = isRing;
+        }
+    </script>
+    <script type="x-shader/x-fragment" id="fragmentshader">
+        varying vec3 vColor; varying float vDist; varying float vOpacity;
+        varying float vScaleFactor; varying float vIsRing;
+        void main() {
+            vec2 cxy = 2.0 * gl_PointCoord - 1.0;
+            float r = dot(cxy, cxy);
+            if (r > 1.0) discard;
+            float glow = smoothstep(1.0, 0.4, r); 
+            float t = clamp((vScaleFactor - 0.15) / 2.35, 0.0, 1.0);
+            float densityAlpha = 0.25 + 0.45 * smoothstep(0.0, 0.5, t);
+            gl_FragColor = vec4(vColor * (0.2 + 1.0 * t), glow * vOpacity * densityAlpha);
+        }
+    </script>
+    <script type="x-shader/x-vertex" id="starVertexShader">
+        attribute float size; attribute vec3 customColor; varying vec3 vColor;
+        void main() { vColor = customColor; vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+        gl_PointSize = size * (1000.0 / -mvPosition.z); gl_Position = projectionMatrix * mvPosition; }
+    </script>
+    <script type="x-shader/x-fragment" id="starFragmentShader">
+        varying vec3 vColor; uniform float uTime;
+        void main() { vec2 cxy = 2.0 * gl_PointCoord - 1.0; float r = dot(cxy, cxy);
+        if (r > 1.0) discard; gl_FragColor = vec4(vColor, 1.0 - r); }
+    </script>
+
+    <script>
+        let scene, camera, renderer, particles, planetGroup;
+        let uniforms, starUniforms;
+        
+        let targetScale = 1.0, currentScale = 1.0;
+        let targetRotX = 0.4, currentRotX = 0.4;
+        let targetRotY = 0, currentRotY = 0;
+        
+        let isHandDetected = false;
+        let lastInteractionTime = Date.now();
+        const statusMode = document.getElementById('status-mode');
+        const signalSrc = document.getElementById('signal-src');
+        const loadingEl = document.getElementById('loading');
+
+        function initThree() {
+            const container = document.getElementById('canvas-container');
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 1, 10000);
+            camera.position.z = 100;
+
+            initSaturn();
+            initStarfield();
+
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            container.appendChild(renderer.domElement);
+
+            setupInteractions(container);
+            
+            window.addEventListener('resize', () => {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            });
+
+            animate();
+        }
+
+        // 交互逻辑：鼠标/触控
+        function setupInteractions(container) {
+            let isDragging = false;
+            let lastX, lastY;
+            let initialPinchDist = null;
+
+            const onStart = (x, y) => {
+                isDragging = true;
+                lastX = x; lastY = y;
+                lastInteractionTime = Date.now();
+                // 如果是手动操作，暂时禁用手势标记（可选）
+                // isHandDetected = false; 
+            };
+            const onMove = (x, y) => {
+                if (!isDragging) return;
+                const dx = x - lastX;
+                const dy = y - lastY;
+                targetRotY += dx * 0.005;
+                targetRotX += dy * 0.005;
+                targetRotX = Math.max(-1.5, Math.min(1.5, targetRotX));
+                lastX = x; lastY = y;
+                lastInteractionTime = Date.now();
+            };
+
+            container.addEventListener('mousedown', e => onStart(e.clientX, e.clientY));
+            window.addEventListener('mousemove', e => onMove(e.clientX, e.clientY));
+            window.addEventListener('mouseup', () => isDragging = false);
+
+            container.addEventListener('wheel', e => {
+                targetScale -= e.deltaY * 0.001;
+                targetScale = Math.max(0.15, Math.min(3.0, targetScale));
+                lastInteractionTime = Date.now();
+            }, { passive: true });
+
+            container.addEventListener('touchstart', e => {
+                lastInteractionTime = Date.now();
+                if (e.touches.length === 1) {
+                    onStart(e.touches[0].clientX, e.touches[0].clientY);
+                } else if (e.touches.length === 2) {
+                    initialPinchDist = Math.hypot(e.touches[0].pageX - e.touches[1].pageX, e.touches[0].pageY - e.touches[1].pageY);
+                }
+            }, { passive: false });
+
+            container.addEventListener('touchmove', e => {
+                if (e.touches.length === 1) {
+                    onMove(e.touches[0].clientX, e.touches[0].clientY);
+                } else if (e.touches.length === 2 && initialPinchDist) {
+                    const dist = Math.hypot(e.touches[0].pageX - e.touches[1].pageX, e.touches[0].pageY - e.touches[1].pageY);
+                    const zoom = dist / initialPinchDist;
+                    targetScale = Math.max(0.15, Math.min(3.0, targetScale * zoom));
+                    initialPinchDist = dist;
+                    lastInteractionTime = Date.now();
+                }
+            }, { passive: false });
+
+            container.addEventListener('touchend', () => { isDragging = false; initialPinchDist = null; });
+        }
+
+        function initSaturn() {
+            const particleCount = 1000000; // 略微减少移动端压力
+            const geo = new THREE.BufferGeometry();
+            const pos = new Float32Array(particleCount * 3);
+            const cols = new Float32Array(particleCount * 3);
+            const sizes = new Float32Array(particleCount);
+            const ringAttr = new Float32Array(particleCount);
+            const randomIds = new Float32Array(particleCount);
+            const speeds = new Float32Array(particleCount);
+            const ops = new Float32Array(particleCount);
+
+            const R = 18;
+            for(let i=0; i<particleCount; i++){
+                randomIds[i] = Math.random();
+                let x,y,z, r,g,b, isR=0;
+                if(i < particleCount * 0.2){
+                    const u = Math.random(), v = Math.random();
+                    const theta = 2 * Math.PI * u, phi = Math.acos(2 * v - 1);
+                    x = R * Math.sin(phi) * Math.cos(theta);
+                    y = R * Math.cos(phi) * 0.9;
+                    z = R * Math.sin(phi) * Math.sin(theta);
+                    r=0.8; g=0.7; b=0.5;
+                } else {
+                    isR = 1;
+                    const rad = R * (1.3 + Math.random() * 1.0);
+                    const ang = Math.random() * Math.PI * 2;
+                    x = Math.cos(ang) * rad; z = Math.sin(ang) * rad;
+                    y = (Math.random()-0.5) * 0.1;
+                    r=0.6; g=0.55; b=0.5;
+                    speeds[i] = 8.0 / Math.sqrt(rad);
+                }
+                pos[i*3]=x; pos[i*3+1]=y; pos[i*3+2]=z;
+                cols[i*3]=r; cols[i*3+1]=g; cols[i*3+2]=b;
+                sizes[i] = Math.random() * 1.5;
+                ringAttr[i] = isR;
+                ops[i] = isR ? 0.6 : 0.9;
+            }
+            geo.setAttribute('position', new THREE.BufferAttribute(pos,3));
+            geo.setAttribute('customColor', new THREE.BufferAttribute(cols,3));
+            geo.setAttribute('size', new THREE.BufferAttribute(sizes,1));
+            geo.setAttribute('isRing', new THREE.BufferAttribute(ringAttr,1));
+            geo.setAttribute('orbitSpeed', new THREE.BufferAttribute(speeds,1));
+            geo.setAttribute('opacityAttr', new THREE.BufferAttribute(ops,1));
+            geo.setAttribute('aRandomId', new THREE.BufferAttribute(randomIds,1));
+
+            uniforms = { uTime:{value:0}, uScale:{value:1}, uRotationX:{value:0.4} };
+            particles = new THREE.Points(geo, new THREE.ShaderMaterial({
+                uniforms, vertexShader:document.getElementById('vertexshader').textContent,
+                fragmentShader:document.getElementById('fragmentshader').textContent,
+                transparent:true, blending:THREE.AdditiveBlending, depthWrite:false
+            }));
+            particles.rotation.z = 0.4;
+            scene.add(particles);
+        }
+
+        function initStarfield() {
+            const geo = new THREE.BufferGeometry();
+            const pos = new Float32Array(30000 * 3);
+            for(let i=0; i<90000; i++) pos[i] = (Math.random()-0.5) * 5000;
+            geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+            geo.setAttribute('customColor', new THREE.BufferAttribute(new Float32Array(90000).fill(1), 3));
+            geo.setAttribute('size', new THREE.BufferAttribute(new Float32Array(30000).map(()=>Math.random()*2), 1));
+            scene.add(new THREE.Points(geo, new THREE.ShaderMaterial({
+                vertexShader:document.getElementById('starVertexShader').textContent,
+                fragmentShader:document.getElementById('starFragmentShader').textContent,
+                transparent:true, blending:THREE.AdditiveBlending
+            })));
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const time = performance.now() * 0.001;
+            uniforms.uTime.value = time;
+
+            // 逻辑优先级: 手势 > 手动触控(最近5秒) > 自动巡航
+            const timeSinceInteract = Date.now() - lastInteractionTime;
+            
+            if (isHandDetected) {
+                // 手势控制中
+                statusMode.innerText = "视觉控制 (AI)";
+                signalSrc.innerText = "手势已捕获";
+                signalSrc.style.color = "#0f0";
+            } else if (timeSinceInteract < 5000) {
+                // 触控/鼠标控制中
+                statusMode.innerText = "手动接管";
+                signalSrc.innerText = "触控/鼠标";
+                signalSrc.style.color = "#c5a059";
+            } else {
+                // 自动巡航
+                targetScale = 1.0 + Math.sin(time * 0.5) * 0.1;
+                targetRotX = 0.4 + Math.sin(time * 0.3) * 0.1;
+                targetRotY += 0.002;
+                statusMode.innerText = "自动巡航";
+                signalSrc.innerText = "无输入";
+                signalSrc.style.color = "#888";
+            }
+
+            // 平滑动画
+            currentScale += (targetScale - currentScale) * 0.08;
+            currentRotX += (targetRotX - currentRotX) * 0.08;
+            currentRotY += (targetRotY - currentRotY) * 0.08;
+
+            uniforms.uScale.value = currentScale;
+            uniforms.uRotationX.value = currentRotX;
+            particles.rotation.y = currentRotY;
+
+            renderer.render(scene, camera);
+        }
+
+        // --- 手势识别修复版 ---
+        const videoElement = document.getElementsByClassName('input_video')[0];
+        const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+        
+        hands.setOptions({ 
+            maxNumHands: 1, 
+            modelComplexity: 1, // 移动端建议为 0 或 1，1 更准但稍慢
+            minDetectionConfidence: 0.5, // 降低检测阈值，使其更容易识别
+            minTrackingConfidence: 0.5 
+        });
+        
+        hands.onResults(results => {
+            loadingEl.style.display = 'none';
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                isHandDetected = true;
+                lastInteractionTime = Date.now(); // 只要检测到手，就视为交互
+                
+                const hand = results.multiHandLandmarks[0];
+                
+                // 1. 缩放逻辑 (大拇指指尖 - 食指指尖距离)
+                const p1 = hand[4];
+                const p2 = hand[8];
+                const dist = Math.hypot(p1.x - p2.x, p1.y - p2.y);
+                
+                // 调整 sensitivity: 移动端摄像头视角不同，距离值通常在 0.02 - 0.3 之间
+                // 我们将其映射到 0.2 - 2.5 的缩放范围
+                targetScale = 0.2 + (dist * 7.0); 
+
+                // 2. 旋转逻辑 (手掌中心位置)
+                // hand[9] 是中指根部，比较稳定
+                const cx = hand[9].x;
+                const cy = hand[9].y;
+
+                // X 轴旋转 (上下移动手)
+                targetRotX = (cy - 0.5) * 2.5;
+                
+                // Y 轴旋转 (左右移动手) - 注意镜像问题，这里取反
+                targetRotY = -(cx - 0.5) * 4.0; 
+
+            } else {
+                isHandDetected = false;
+            }
+        });
+
+        // 关键修复：Camera 初始化增加 facingMode 和分辨率限制
+        const cameraInst = new Camera(videoElement, {
+            onFrame: async () => { 
+                await hands.send({image: videoElement}); 
+            },
+            width: 640,  // 降低分辨率以提高手机端 FPS
+            height: 480,
+            facingMode: 'user' // 强制使用前置摄像头
+        });
+        
+        cameraInst.start()
+            .then(() => {
+                console.log("摄像头启动成功");
+            })
+            .catch(e => {
+                console.error(e);
+                loadingEl.innerHTML = "摄像头启动失败<br>请检查HTTPS或权限<br>(仍可使用触控)";
+            });
+
+        function toggleFullScreen() {
+            if (!document.fullscreenElement) document.documentElement.requestFullscreen();
+            else document.exitFullscreen();
+        }
+
+        initThree();
+    </script>
+</body>
+</html>
